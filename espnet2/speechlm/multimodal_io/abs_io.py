@@ -32,22 +32,21 @@ class AbsIO(ABC, Module):
         self.is_discrete = is_discrete
 
     @abstractmethod
-    def encode_batch(self, batch_data: List[Any]) -> Dict[str, np.ndarray]:
+    def encode_batch(self, batch_data: List[Any]) -> Dict[str, Any]:
         """Encode a batch of raw input data into model-ready arrays.
 
         Args:
             batch_data: List of raw input data in modality-specific format
 
         Returns:
-            Dictionary containing batched arrays with keys such as:
+            Dictionary containing batched arrays with keys:
                 - 'data': Main encoded array [batch, seq_len, ...]
                 - 'lengths': Sequence lengths [batch]
-                - 'mask': Attention mask [batch, seq_len]
         """
         raise NotImplementedError
 
     @abstractmethod
-    def decode_batch(self, batch_encoded: Dict[str, np.ndarray]) -> List[Any]:
+    def decode_batch(self, batch_encoded: Dict[str, Any]) -> List[Any]:
         """Decode a batch of encoded arrays back to original format.
 
         Args:
@@ -59,17 +58,17 @@ class AbsIO(ABC, Module):
         raise NotImplementedError
 
     @abstractmethod
-    def find_length_batch(self, batch_data: List[Any]) -> List[int]:
-        """Calculate sequence lengths after encoding without full encoding.
+    def find_length(self, data: Any) -> int:
+        """Calculate sequence length after encoding without full encoding.
 
         This method allows efficient length calculation for batching
         and padding operations without performing the actual encoding.
 
         Args:
-            batch_data: List of raw input data in modality-specific format
+            data: Single raw input data in modality-specific format
 
         Returns:
-            List of expected sequence lengths after encoding
+            Expected sequence length after encoding
         """
         raise NotImplementedError
 

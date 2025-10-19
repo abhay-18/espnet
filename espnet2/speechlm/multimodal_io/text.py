@@ -20,7 +20,8 @@ class HuggingFaceTextIO(AbsIO):
 
         Args:
             tokenizer_name: HuggingFace model name or path for the tokenizer
-                           (e.g., "bert-base-uncased", "gpt2", "facebook/opt-125m")
+                           (e.g., "bert-base-uncased", "gpt2",
+                           "facebook/opt-125m")
         """
         super().__init__(modality="text", is_discrete=True)
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
@@ -31,75 +32,88 @@ class HuggingFaceTextIO(AbsIO):
         # Here records the real model embedding size.
         self.real_vocab_size = AutoConfig.from_pretrained(tokenizer_name).vocab_size
 
-        # Add padding token if not present
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-
     def encode_batch(self, batch_data: List[str]) -> Dict[str, np.ndarray]:
-        """Encode a single text string into token IDs.
-
-        Args:
-            batch_data: List containing exactly one text string
-
-        Returns:
-            Dictionary containing:
-                - 'data': Token IDs array [1, seq_len]
-        """
-        if len(batch_data) != 1:
-            raise ValueError(f"Text encode_batch only accepts batch size 1, got {len(batch_data)}")
-
-        text = batch_data[0]
-
-        # Tokenize single text without padding
-        encoded = self.tokenizer(
-            text,
-            truncation=True,
-            return_tensors="np",
-        )
-
-        return {
-            "data": encoded["input_ids"],  # Shape: [1, seq_len]
-        }
-
-    def decode_batch(self, batch_encoded: Dict[str, np.ndarray]) -> List[str]:
-        """Decode a single sequence of token IDs back to text string.
-
-        Args:
-            batch_encoded: Dictionary containing 'data' with token IDs [1, seq_len]
-
-        Returns:
-            List containing one decoded text string
-        """
-        token_ids = batch_encoded["data"]
-
-        if token_ids.shape[0] != 1:
-            raise ValueError(f"Text decode_batch only accepts batch size 1, got {token_ids.shape[0]}")
-
-        # Decode single sequence
-        text = self.tokenizer.decode(
-            token_ids[0],
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=True
-        )
-
-        return [text]
-
-    def find_length_batch(self, batch_data: List[str]) -> List[int]:
-        """Calculate token sequence lengths without full encoding.
+        """Encode a batch of text strings into token IDs.
 
         Args:
             batch_data: List of text strings
 
         Returns:
-            List of token counts after tokenization
+            Dictionary containing:
+                - 'data': Token IDs array [batch_size, max_seq_len]
+                - 'lengths': Sequence lengths array [batch_size]
         """
-        if len(batch_data) != 1:
-            raise ValueError(f"Text find_length_batch only accepts batch size 1, got {len(batch_data)}")
+        if len(batch_data) == 0:
+            raise ValueError("encode_batch requires at least one text string")
 
-        text = batch_data[0]
-        # Fast tokenization without creating tensors
-        tokens = self.tokenizer.tokenize(text)
-        return [len(tokens)]
+        # Tokenize batch with padding to the longest sequence
+        encoded = self.tokenizer(
+            batch_data,
+            padding=True,  # Pad to longest sequence in batch
+            truncation=True,
+            return_tensors="np",
+        )
+
+        input_ids = encoded["input_ids"]  # Shape: [batch_size, max_seq_len]
+        attention_mask = encoded["attention_mask"]  # Shape: [batch_size, max_seq_len]
+
+        # Calculate actual lengths from attention mask
+        lengths = np.sum(attention_mask, axis=1, dtype=np.int32)  # Shape: [batch_size]
+
+        return {
+            "data": input_ids,
+            "lengths": lengths,
+        }
+
+    def decode_batch(self, batch_encoded: Dict[str, np.ndarray]) -> List[str]:
+        """Decode a batch of token ID sequences back to text strings.
+
+        Args:
+            batch_encoded: Dictionary containing 'data' with token IDs
+                          [batch_size, seq_len]
+
+        Returns:
+            List of decoded text strings
+        """
+        token_ids = batch_encoded["data"]
+
+        if len(token_ids.shape) != 2:
+            raise ValueError(
+                f"Expected 2D array [batch_size, seq_len], "
+                f"got shape {token_ids.shape}"
+            )
+
+        # Decode each sequence in the batch
+        texts = []
+        for i in range(token_ids.shape[0]):
+            text = self.tokenizer.decode(
+                token_ids[i],
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=True,
+            )
+            texts.append(text)
+
+        return texts
+
+    def find_length(self, data: str) -> int:
+        """Calculate token sequence length without full encoding.
+
+        Args:
+            data: Single text string
+
+        Returns:
+            Token count after tokenization
+        """
+        if not isinstance(data, str):
+            raise ValueError(f"find_length expects a string, got {type(data)}")
+
+        # Use the tokenizer's encode method to get accurate length
+        # including special tokens (e.g., [CLS], [SEP] for BERT)
+        token_ids = self.tokenizer.encode(
+            data, truncation=True, add_special_tokens=True
+        )
+
+        return len(token_ids)
 
     def feature_dim(self) -> Optional[int]:
         """Get feature dimension (None for discrete text modality).
@@ -138,8 +152,7 @@ class HuggingFaceTextIO(AbsIO):
         Returns:
             List containing single tuple [(0, vocab_size)] for text's single stream
         """
-        vocab_size = len(self.tokenizer.get_vocab())
-        return [(0, vocab_size)]
+        return [(0, self.real_vocab_size)]
 
     def get_stream_weight(self) -> Optional[List[float]]:
         """Get loss weights for all streams.
