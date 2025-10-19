@@ -226,5 +226,5 @@ class CombinedDataset(Dataset):
         Returns:
             Dictionary with keys from data entry names
         """
-        dataset_name, sample_id = key
-        return self.datasets[dataset_name][sample_id]
+        _, dataset_name, sample_id = key
+        return key, self.datasets[dataset_name][sample_id]

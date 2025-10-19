@@ -3,7 +3,7 @@
 from typing import Dict, List, Optional
 
 import numpy as np
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoConfig
 
 from espnet2.speechlm.multimodal_io.abs_io import AbsIO
 
@@ -25,6 +25,11 @@ class HuggingFaceTextIO(AbsIO):
         super().__init__(modality="text", is_discrete=True)
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         self.tokenizer_name = tokenizer_name
+
+        # NOTE(Jinchuan): As the model would reserve some unused slots for future
+        # expansion, this vocabulary length is smaller than model embeddings size.
+        # Here records the real model embedding size.
+        self.real_vocab_size = AutoConfig.from_pretrained(tokenizer_name).vocab_size
 
         # Add padding token if not present
         if self.tokenizer.pad_token is None:
@@ -118,12 +123,14 @@ class HuggingFaceTextIO(AbsIO):
         Returns:
             List of all tokens in the vocabulary
         """
-        # Get vocabulary from tokenizer
         vocab = self.tokenizer.get_vocab()
-        # Sort by token ID to maintain consistent ordering
         sorted_tokens = sorted(vocab.items(), key=lambda x: x[1])
-        # Return just the token strings in order
-        return [token for token, _ in sorted_tokens]
+        vocab = [token for token, _ in sorted_tokens]
+
+        while len(vocab) < self.real_vocab_size:
+            vocab.append(f"<|unused_text_{len(vocab)}|>")
+
+        return vocab
 
     def get_stream_interval(self) -> Optional[List[tuple]]:
         """Get vocabulary intervals for all streams.

@@ -1,6 +1,7 @@
 """Discrete audio I/O implementation combining codec and SSL tokenization."""
 
 from typing import List, Optional, Tuple
+import numpy as np
 import torch
 import joblib
 from pathlib import Path
@@ -80,7 +81,7 @@ class DiscreteAudioIO(AbsIO):
             codec_choice: Type of codec to use ("ESPnet" or None to disable)
             codec_hf_model_tag: HuggingFace model tag for codec tokenizer
             codec_max_token_per_frame: Maximum number of codec tokens per frame (default: 8)
-            ssl_choice: Type of SSL model to use ("espnet_hubert" or None to disable)
+            ssl_choice: Type of SSL model to use ("ESPnet" or None to disable)
             ssl_hf_model_tag: HuggingFace model tag for SSL model (e.g., "espnet/xeus")
             delay_interleave: Whether to apply delay interleaving to multi-stream tokens (default: False)
             device: Device to run models on (default: "cpu")
@@ -163,11 +164,11 @@ class DiscreteAudioIO(AbsIO):
         """Initialize SSL tokenizer.
 
         Args:
-            ssl_choice: Type of SSL model to use ("espnet_hubert" or None to disable)
+            ssl_choice: Type of SSL model to use ("ESPnet" or None to disable)
             ssl_hf_model_tag: HuggingFace model tag for SSL model
 
         Raises:
-            NotImplementedError: If ssl_choice is not None and not "espnet_hubert"
+            NotImplementedError: If ssl_choice is not None and not "ESPnet"
         """
         if ssl_choice is None:
             # No SSL tokenizer
@@ -179,7 +180,7 @@ class DiscreteAudioIO(AbsIO):
             self.ssl_frame_shift = None
             self.ssl_frame_per_second = None
 
-        elif ssl_choice == "espnet_hubert":
+        elif ssl_choice == "ESPnet":
             if ssl_hf_model_tag != "espnet/xeus":
                 raise NotImplementedError(
                     f"Currently only support XEUS model ('espnet/xeus'), got '{ssl_hf_model_tag}'"
@@ -467,7 +468,7 @@ class DiscreteAudioIO(AbsIO):
         Returns:
             SSL codes tensor of shape [batch, time, ssl_n_streams]
         """
-        if self.ssl_choice == "espnet_hubert":
+        if self.ssl_choice == "ESPnet":
             if data.size(1) > 1:
                 raise ValueError("ESPnet-Hubert SSL model doesn't support multi-channel audio")
             feats = self.ssl_model.encode(data.squeeze(1), length)['encoder_output'][-1]
@@ -504,28 +505,33 @@ class DiscreteAudioIO(AbsIO):
 
         return codes
 
-    def find_length_batch(self, data: torch.Tensor, length: torch.Tensor) -> List[int]:
-        """Calculate frame lengths after encoding.
+    def find_length(self, data) -> int:
+        """Calculate frame length after encoding.
 
         Args:
-            data: Audio tensor of shape [batch, num_channel, num_sample]
-            length: Effective sample lengths tensor of shape [batch]
+            data: Audio numpy array of shape [num_channel, num_sample]
 
         Returns:
-            List of frame lengths after encoding
+            Frame length after encoding
         """
         # Input validation
-        if data.dim() != 3:
-            raise ValueError(f"Expected 3D tensor [batch, channel, samples], got {data.dim()}D")
-        if length.size(0) != data.size(0):
-            raise ValueError(f"Batch size mismatch: data={data.size(0)}, length={length.size(0)}")
-        # Calculate frame counts by dividing sample lengths by frame shift
-        frame_lengths = length // self.frame_shift
+        if not isinstance(data, np.ndarray):
+            raise TypeError(f"Expected numpy array, got {type(data)}")
+        if data.ndim != 2:
+            raise ValueError(
+                f"Expected 2D array [channel, samples], got {data.ndim}D"
+            )
+
+        # Get number of samples from the data shape
+        num_samples = data.shape[1]
+
+        # Calculate frame count by dividing sample length by frame shift
+        frame_length = num_samples // self.frame_shift
 
         if self.delay_interleave:
-            frame_lengths = frame_lengths + self.num_stream() - 1
+            frame_length = frame_length + self.num_stream() - 1
 
-        return frame_lengths.tolist()
+        return int(frame_length)
 
     def feature_dim(self) -> Optional[int]:
         """Get feature dimension (None for discrete modality).
@@ -686,6 +692,8 @@ class ContinuousAudioIO(AbsIO):
         self,
         encoder_choice: str = "huggingface",
         encoder_hf_model_tag: str = "Qwen/Qwen2.5-Omni-7B",
+        attn_implementation: str = None,
+        torch_dtype: str = "bfloat16",
         device: str = 'cpu'
     ):
         """Initialize continuous audio encoder.
@@ -707,6 +715,8 @@ class ContinuousAudioIO(AbsIO):
         self.device = device
         self.encoder_choice = encoder_choice
         self.encoder_hf_model_tag = encoder_hf_model_tag
+        self.attn_implementation = attn_implementation
+        self.torch_dtype = torch_dtype
 
         self._init_encoder(encoder_choice, encoder_hf_model_tag)
 
@@ -737,16 +747,18 @@ class ContinuousAudioIO(AbsIO):
         if encoder_choice == "huggingface":
             if encoder_hf_model_tag == "Qwen/Qwen2.5-Omni-7B":
                 from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
-                qwen_omni = Qwen2_5OmniForConditionalGeneration.from_pretrained(
-                    encoder_hf_model_tag
-                )
-                self.model = qwen_omni.audio_tower.to(self.device)
+                audio_tower = Qwen2_5OmniForConditionalGeneration.from_pretrained(
+                    encoder_hf_model_tag,
+                    attn_implementation=self.attn_implementation,
+                    torch_dtype=self.torch_dtype,
+                ).thinker.audio_tower
+                self.model = audio_tower.to(self.device)
                 self.processor = Qwen2_5OmniProcessor.from_pretrained(
                     encoder_hf_model_tag
                 ).feature_extractor
-                self.d_model = self.model.embed_dim
+                self.d_model = self.model.config.d_model
                 self.n_samples = self.processor.n_samples
-                self.sample_rate = self.processor.sample_rate
+                self.sample_rate = self.processor.sampling_rate
                 self.hop_length = self.processor.hop_length
                 self.down_sample = 4  # hard code
 
@@ -794,21 +806,33 @@ class ContinuousAudioIO(AbsIO):
         """
         raise NotImplementedError("Continuous audio encoder doesn't support audio generation")
 
-    def find_length_batch(self, data: torch.Tensor, length: torch.Tensor) -> List[int]:
-        """Calculate feature frame lengths after encoding.
+    def find_length(self, data) -> int:
+        """Calculate feature frame length after encoding.
 
         Args:
-            data: Audio tensor of shape [batch, num_channel, num_sample]
-            length: Effective sample lengths tensor of shape [batch]
+            data: Audio numpy array of shape [num_channel, num_sample]
 
         Returns:
-            List of feature frame lengths after encoding
+            Feature frame length after encoding
 
         Raises:
-            ValueError: If input dimensions are incorrect or batch sizes don't match
+            ValueError: If input dimensions are incorrect
         """
+        # Input validation
+        if not isinstance(data, np.ndarray):
+            raise TypeError(f"Expected numpy array, got {type(data)}")
+        if data.ndim != 2:
+            raise ValueError(
+                f"Expected 2D array [channel, samples], got {data.ndim}D"
+            )
 
-        return length // self.hop_length // self.down_sample
+        # Get number of samples from the data shape
+        num_samples = data.shape[1]
+
+        # Calculate frame length based on hop length and downsampling
+        frame_length = num_samples // self.hop_length // self.down_sample
+
+        return int(frame_length)
 
     def feature_dim(self) -> Optional[int]:
         """Get feature dimension for continuous representation.
