@@ -23,7 +23,7 @@ class AbsJobTemplate(ABC):
         self.config = config
 
     @abstractmethod
-    def build_collate_fn(self) -> Callable:
+    def build_preprocessor(self) -> Callable:
         """Build and return the data collation function for PyTorch DataLoader.
 
         The collate_fn is used by PyTorch DataLoader to combine multiple

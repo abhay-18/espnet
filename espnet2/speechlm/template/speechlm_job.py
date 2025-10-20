@@ -6,28 +6,10 @@ import yaml
 import re
 import torch.nn as nn
 
-from espnet2.speechlm.configuration.abs_job import AbsJobTemplate
-
-# Multimodal IO import
-from espnet2.speechlm.multimodal_io.abs_io import AbsIO
-from espnet2.speechlm.multimodal_io.text import HuggingFaceTextIO
-from espnet2.speechlm.multimodal_io.audio import DiscreteAudioIO, ContinuousAudioIO
-
-# Model import
-from espnet2.speechlm.model.speechlm.parallel import ParallelHFModel
-
-# Task Template
-from espnet2.speechlm.configuration.task_conf_speechlm import SPEECHLM_TASK_TEMPLATES
-
-multimodle_io_choices = {
-    "text": HuggingFaceTextIO,
-    "discrete_audio": DiscreteAudioIO,
-    "continuous_audio": ContinuousAudioIO,
-}
-
-model_choices = {
-    "parallel": ParallelHFModel
-}
+from espnet2.speechlm.template import AbsJobTemplate
+from espnet2.speechlm.configuration import SPEECHLM_TASK_CONFIGS
+from espnet2.speechlm.multimodal_io import AbsIO, MULTIMODAL_IOS
+from espnet2.speechlm.model.speechlm import SPEECHLM_MODELS
 
 class SpeechLMJobTemplate(AbsJobTemplate):
     """Job template for SpeechLM training tasks.
@@ -51,9 +33,9 @@ class SpeechLMJobTemplate(AbsJobTemplate):
         io_config = config['multimodal_io']
         self.multimodal_io = dict()
         for io_name, io_config in io_config.items():
-            multimodal_io_class = multimodle_io_choices[io_name]
+            multimodal_io_class = MULTIMODAL_IOS[io_name]
             assert issubclass(multimodal_io_class, AbsIO)
-            self.multimodal_io[io_name] = multimodle_io_choices[io_name](**io_config)
+            self.multimodal_io[io_name] = multimodal_io_class(**io_config)
         
         self.vocab, self.vocab_interval = self._build_vocabulary()
 
@@ -88,7 +70,7 @@ class SpeechLMJobTemplate(AbsJobTemplate):
         return vocab, vocab_interval
         
 
-    def build_collate_fn(self) -> Callable:
+    def build_preprocessor(self) -> Callable:
         """Build the data collation function for SpeechLM.
 
         Returns:
@@ -96,8 +78,12 @@ class SpeechLMJobTemplate(AbsJobTemplate):
         """
 
         processor_config = self.config['preprocessor']
+        multimodal_io = {
+            io_name: io.copy_for_worker()
+            for io_name, io in self.multimodal_io.items()
+        }
         return SpeechLMPreprocessor(
-            multimodal_io=self.multimodal_io,
+            multimodal_io=multimodal_io,
             vocab=self.vocab,
             vocab_interval=self.vocab_interval,
             audio_input=processor_config['audio_input'],
@@ -112,7 +98,7 @@ class SpeechLMJobTemplate(AbsJobTemplate):
         """
 
         model_config = self.config['model']
-        model_class = model_choices[model_config['model_choice']]
+        model_class = SPEECHLM_MODELS[model_config['model_choice']]
 
         model = model_class(
             model_hf_tag=model_config['model_hf_tag'],
@@ -135,7 +121,6 @@ class SpeechLMPreprocessor:
         vocab_interval,
         audio_input: str = "continuous_audio",
         audio_output: str = "discrete_audio",
-        find_length_only: bool = False,
     ):
         
         # (1) keep all multimodal_io
@@ -148,8 +133,21 @@ class SpeechLMPreprocessor:
         self.vocab_interval = vocab_interval
 
         # (3) Additional add-on operations:
-        self.find_length_only = find_length_only
     
+    def find_length(self, key, data_dict):
+        task, _, _ = key
+        messages = self._apply_chat_template(task, data_dict)
+
+        # (1) <bos>
+        length = 2
+
+        # (2) each message, consider role, modality and end of <eot>/<eos>
+        for _, this_io, this_data in messages:
+            length += 3
+            length += self.multimodal_io[this_io].find_length(this_data)
+        
+        return length
+
     def __call__(self, data_lst):
         raise NotImplementedError
     
@@ -163,28 +161,29 @@ class SpeechLMPreprocessor:
 
         raise NotImplementedError
     
-    def _apply_chat_template(self, data_dict, task):
-        task_template = SPEECHLM_TASK_TEMPLATES[task]
-        messages = list()
-        for role, entry in task_template:
-            if bool(re.match(r"^audio", entry)):
-                if role == "user":
-                    this_io = self.audio_input
-                elif role == "assistant":
-                    this_io = self.audio_output
+    def _apply_chat_template(self, task, data_dict):
+        if "dialogue" in data_dict:
+            if len(data_dict) != 1:
+                raise ValueError("If dialogue exist, there should be no more other entries")
+            return data_dict['dialogue']
+        else:
+            task_config = SPEECHLM_TASK_CONFIGS[task]
+            messages = list()
+            for role, entry in task_config:
+                if bool(re.match(r"^audio", entry)):
+                    if role == "user" or role == "system":
+                        this_io = self.audio_input
+                    elif role == "assistant":
+                        this_io = self.audio_output
+                elif bool(re.match(r"^text", entry)):
+                    this_io = "text"
                 else:
-                    raise ValueError(f"Not implemented role for audio modality")
-            elif bool(re.match(r"^text", entry)):
-                this_io = "text"
-            else:
-                raise ValueError(f"Not supported data entry in template: {entry}")
-            
-            this_data = data_dict[entry]
-            msg = (role, this_io, this_data)
-            messages.append(msg)
-        
-        return messages
-
+                    raise ValueError(f"Not supported data entry in template: {entry}")
+                
+                this_data = data_dict[entry]
+                message = (role, this_io, this_data)
+                messages.append(message)
+            return messages
 
     def _special_token(self, name):
         token = f"<|{name}|>"

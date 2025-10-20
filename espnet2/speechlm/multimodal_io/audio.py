@@ -1,6 +1,7 @@
-"""Discrete audio I/O implementation combining codec and SSL tokenization."""
+"""Audio I/O implementation for discrete and continuous representations (v2)."""
 
 from typing import Any, Dict, List, Optional, Tuple
+import numpy as np
 import torch
 import joblib
 from pathlib import Path
@@ -91,11 +92,16 @@ class DiscreteAudioIO(AbsIO):
         # Initialize parent class (AbsIO which inherits from both ABC and Module)
         super().__init__(modality="audio", is_discrete=True)
 
-        self.device = device
         self.codec_choice = codec_choice
+        self.codec_hf_model_tag = codec_hf_model_tag
+        self.codec_max_token_per_frame = codec_max_token_per_frame
+
         self.ssl_choice = ssl_choice
-        self.delay_interleave = delay_interleave
+        self.ssl_hf_model_tag = ssl_hf_model_tag
+
         self.stream_weights = stream_weights
+        self.delay_interleave = delay_interleave
+        self.device = device
 
         # Determine which tokenizers to use
         self.use_codec = codec_choice is not None
@@ -337,27 +343,27 @@ class DiscreteAudioIO(AbsIO):
         self.vocabulary.append("<audio_pad>")
         self.audio_pad = len(self.vocabulary) - 1
 
-    def encode_batch(self, batch_data: List[torch.Tensor]) -> Dict[str, Any]:
+    def encode_batch(
+        self, data: torch.Tensor, lengths: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Encode a batch of audio data into discrete tokens.
 
         Args:
-            batch_data: List of audio tensors, each of shape
-                       [num_channels, num_samples]
+            data: Audio tensor of shape [batch, num_channel, num_samples]
+            lengths: Effective sample lengths [batch]
 
         Returns:
-            Dictionary containing:
-                - 'data': Encoded tokens [batch, time, n_streams]
-                - 'lengths': Frame lengths [batch]
+            Tuple of:
+                - codes: Encoded tokens [batch, time, n_streams]
+                - frame_lengths: Frame lengths [batch]
         """
-        if not batch_data:
-            raise ValueError("Empty batch provided")
-
-        # Use pad_list to handle padding and stacking
-        # pad_list expects last dimension to be variable (num_samples in our case)
-        data, sample_lengths = pad_list(batch_data, pad_value=0.0)
+        if data.dim() != 3:
+            raise ValueError(
+                f"Expected 3D tensor [batch, channels, samples], got {data.dim()}D"
+            )
 
         # Calculate frame lengths and trim audio to frame boundaries
-        frame_length = sample_lengths // self.frame_shift
+        frame_length = lengths // self.frame_shift
         length = frame_length * self.frame_shift
 
         data = data[:, :, : max(length)]
@@ -409,9 +415,11 @@ class DiscreteAudioIO(AbsIO):
         else:
             output_frame_length = frame_length
 
-        return {"data": codes, "lengths": output_frame_length}
+        return codes, output_frame_length
 
-    def decode_batch(self, batch_encoded: Dict[str, Any]) -> List[torch.Tensor]:
+    def decode_batch(
+        self, codes: torch.Tensor, lengths: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Decode a batch of encoded tokens back to audio.
 
         Note: Only codec tokens are used for audio reconstruction.
@@ -419,23 +427,19 @@ class DiscreteAudioIO(AbsIO):
         that cannot be directly converted back to waveforms.
 
         Args:
-            batch_encoded: Dictionary containing:
-                - 'data': Encoded tokens [batch, time, n_streams]
-                - 'lengths': Frame lengths [batch]
+            codes: Encoded tokens [batch, time, n_streams]
+            lengths: Frame lengths [batch]
 
         Returns:
-            List of reconstructed audio tensors, each of shape
-            [num_channels, num_samples]
+            Tuple of:
+                - audio: Reconstructed audio [batch, num_channels, num_samples]
+                - audio_lengths: Sample lengths [batch]
         """
         if not self.use_codec:
             raise RuntimeError(
                 "Cannot decode audio without codec tokenizer. "
                 "SSL tokens alone cannot be converted back to audio."
             )
-
-        # Extract codes and lengths from dictionary
-        codes = batch_encoded["data"]
-        lengths = batch_encoded["lengths"]
 
         # Validate tensor dimensions
         if codes.dim() != 3:
@@ -468,17 +472,7 @@ class DiscreteAudioIO(AbsIO):
         # Decode codec tokens to audio
         audio, audio_lengths = self._codec_decode_batch(codec_codes, lengths)
 
-        # Convert batch tensor to list of individual audio tensors
-        batch_size = audio.size(0)
-        audio_list = []
-        for i in range(batch_size):
-            # Extract audio for this sample and trim to actual length
-            sample_length = audio_lengths[i].item()
-            # Remove batch dimension, keep [num_channels, num_samples]
-            audio_sample = audio[i, :, :sample_length]
-            audio_list.append(audio_sample)
-
-        return audio_list
+        return audio, audio_lengths
 
     def _codec_decode_batch(
         self, codes: torch.Tensor, lengths: torch.Tensor
@@ -572,41 +566,23 @@ class DiscreteAudioIO(AbsIO):
 
         return codes
 
-    def find_length(self, data: torch.Tensor) -> int:
+    def find_length(self, data: Tuple[np.ndarray, int]) -> int:
         """Calculate frame length after encoding.
 
         Args:
-            data: Audio tensor of shape [num_channels, num_samples]
+            data: Tuple of (audio_array, sample_rate) where audio_array
+                  has shape [num_channels, num_samples]
 
         Returns:
-            Frame length after encoding
+            Frame length after encoding (number of frames)
         """
-        # Input validation
-        if not isinstance(data, torch.Tensor):
-            raise TypeError(f"Expected torch.Tensor, got {type(data)}")
-        if data.dim() != 2:
-            raise ValueError(
-                f"Expected 2D tensor [channels, samples], got {data.dim()}D"
-            )
-
-        # Get number of samples from the data shape
-        num_samples = data.shape[1]
-
-        # Calculate frame count by dividing sample length by frame shift
-        frame_length = num_samples // self.frame_shift
+        wav, _ = data
+        frame_length = wav.shape[-1] // self.frame_shift
 
         if self.delay_interleave:
             frame_length = frame_length + self.num_stream() - 1
 
         return int(frame_length)
-
-    def feature_dim(self) -> Optional[int]:
-        """Get feature dimension (None for discrete modality).
-
-        Returns:
-            None (audio uses discrete tokens, not continuous features)
-        """
-        return None
 
     def num_stream(self) -> Optional[int]:
         """Get number of parallel streams (SSL + codec).
@@ -699,31 +675,40 @@ class DiscreteAudioIO(AbsIO):
 
         return new_codes
 
+    def copy_for_worker(self) -> "DiscreteAudioIO":
+        """Create lightweight copy for multiprocessing workers.
+
+        Creates a new instance with the same parameters (loads models)
+        then removes the heavy model components to reduce memory usage
+        in workers while keeping necessary metadata.
+
+        Returns:
+            Lightweight copy suitable for workers
+        """
+        # Create new instance with same parameters (loads models)
+        worker_copy = self.__class__(
+            codec_choice=self.codec_choice,
+            codec_hf_model_tag=self.codec_hf_model_tag,
+            codec_max_token_per_frame=self.codec_max_token_per_frame,
+            ssl_choice=self.ssl_choice,
+            ssl_hf_model_tag=self.ssl_hf_model_tag,
+            stream_weights=self.stream_weights,
+            delay_interleave=self.delay_interleave,
+            device="cpu",  # Workers use CPU
+        )
+
+        # Remove heavy model components after initialization
+        worker_copy.codec_model = None
+        worker_copy.ssl_model = None
+        worker_copy.km_model = None
+
+        return worker_copy
 
 class ContinuousAudioIO(AbsIO):
-    """Continuous audio I/O for audio feature extraction.
+    """Continuous audio I/O for feature extraction.
 
     This class handles continuous audio representations using neural encoders
-    that produce dense feature vectors instead of discrete tokens. It is designed
-    for speech language models that require continuous audio embeddings rather
-    than discrete token sequences.
-
-    Key Features:
-        - Supports various pre-trained audio encoders from HuggingFace
-        - Produces continuous feature representations for downstream tasks
-        - Handles frame-level feature extraction with configurable hop lengths
-        - Automatic device management and batch processing
-
-    Supported Models:
-        - Qwen/Qwen2.5-Omni-7B: Multimodal model with audio tower encoder
-
-    Example:
-        >>> audio_io = ContinuousAudioIO(
-        ...     encoder_choice="huggingface",
-        ...     encoder_hf_model_tag="Qwen/Qwen2.5-Omni-7B",
-        ...     device="cuda"
-        ... )
-        >>> features, lengths = audio_io.encode_batch(audio_data, audio_lengths)
+    that produce dense feature vectors instead of discrete tokens.
     """
 
     def __init__(
@@ -737,16 +722,12 @@ class ContinuousAudioIO(AbsIO):
         """Initialize continuous audio encoder.
 
         Args:
-            encoder_choice: Type of encoder to use. Currently supports:
-                - "huggingface": Load models from HuggingFace model hub
-            encoder_hf_model_tag: HuggingFace model identifier.
-                For "huggingface" choice, currently supports:
-                - "Qwen/Qwen2.5-Omni-7B": Qwen Omni audio tower
-            device: Device for model computation ("cpu", "cuda", "cuda:0", etc.)
-
-        Raises:
-            NotImplementedError: If encoder_choice or encoder_hf_model_tag
-                is not supported
+            encoder_choice: Type of encoder ("huggingface")
+            encoder_hf_model_tag: HuggingFace model identifier
+                (e.g., "Qwen/Qwen2.5-Omni-7B")
+            attn_implementation: Attention implementation type
+            dtype: Model dtype ("bfloat16", "float16", etc.)
+            device: Device for model ("cpu", "cuda", etc.)
         """
         super().__init__(modality="audio", is_discrete=False)
 
@@ -754,126 +735,113 @@ class ContinuousAudioIO(AbsIO):
         self.encoder_choice = encoder_choice
         self.encoder_hf_model_tag = encoder_hf_model_tag
         self.attn_implementation = attn_implementation
-        self.dtype = dtype
+        self.dtype_str = dtype
 
-        self._init_encoder(encoder_choice, encoder_hf_model_tag)
+        # Convert string dtype to torch dtype
+        self.dtype = getattr(torch, dtype)
 
-    def _init_encoder(self, encoder_choice: str, encoder_hf_model_tag: str):
-        """Initialize the audio encoder model.
+        # Initialize the encoder
+        self._init_encoder()
 
-        This method loads and configures the specified audio encoder model,
-        setting up model attributes like feature dimensions, sample rates,
-        and frame shifts.
-
-        Args:
-            encoder_choice: Type of encoder to use ("huggingface")
-            encoder_hf_model_tag: Model identifier for the encoder
-
-        Raises:
-            NotImplementedError: If the encoder choice or model tag is not supported
-
-        Side Effects:
-            Sets the following attributes:
-            - self.model: The loaded encoder model
-            - self.processor: Feature extractor/preprocessor
-            - self.d_model: Feature dimension of encoder output
-            - self.n_samples: Number of samples per frame
-            - self.sample_rate: Audio sample rate (Hz)
-            - self.hop_length: Hop length in samples
-            - self.down_sample: Downsampling factor
-        """
-        if encoder_choice == "huggingface":
-            if encoder_hf_model_tag == "Qwen/Qwen2.5-Omni-7B":
+    def _init_encoder(self):
+        """Initialize the audio encoder model."""
+        if self.encoder_choice == "huggingface":
+            if self.encoder_hf_model_tag == "Qwen/Qwen2.5-Omni-7B":
                 from transformers import (
                     Qwen2_5OmniForConditionalGeneration,
                     Qwen2_5OmniProcessor,
                 )
 
-                audio_tower = Qwen2_5OmniForConditionalGeneration.from_pretrained(
-                    encoder_hf_model_tag,
+                # Load only the audio tower from Qwen model
+                full_model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
+                    self.encoder_hf_model_tag,
                     attn_implementation=self.attn_implementation,
-                    dtype=self.dtype,
-                ).thinker.audio_tower
-                self.model = audio_tower.to(self.device)
+                    torch_dtype=self.dtype,
+                )
+                self.model = full_model.thinker.audio_tower.to(self.device)
+
+                # Load processor for audio preprocessing
                 self.processor = Qwen2_5OmniProcessor.from_pretrained(
-                    encoder_hf_model_tag
+                    self.encoder_hf_model_tag
                 ).feature_extractor
+
+                # Set model attributes
                 self.d_model = self.model.config.d_model
-                self.n_samples = self.processor.n_samples
                 self.sample_rate = self.processor.sampling_rate
                 self.hop_length = self.processor.hop_length
-                self.down_sample = 4  # hard code
+                self.n_samples = self.processor.n_samples
+                self.down_sample = 4  # Hardcoded for Qwen
 
             else:
                 raise NotImplementedError(
-                    f"Model {encoder_hf_model_tag} not implemented"
+                    f"Model {self.encoder_hf_model_tag} not implemented"
                 )
         else:
             raise NotImplementedError(
-                f"Encoder choice {encoder_choice} not implemented"
+                f"Encoder choice {self.encoder_choice} not implemented"
             )
 
-    def encode_batch(self, batch_data: List[torch.Tensor]) -> Dict[str, Any]:
-        raise NotImplementedError
-
-    def decode_batch(self, batch_encoded: Dict[str, Any]) -> List[torch.Tensor]:
-        """Decode continuous features back to audio (if supported).
+    def preprocess(self, data: np.ndarray) -> Dict[str, np.ndarray]:
+        return data
+    
+    def encode_batch(self, batch_data) -> Dict:
+        """Encode batch data (not implemented for continuous audio).
 
         Args:
-            batch_encoded: Dictionary containing:
-                - 'data': Feature tensor [batch, time, feature_dim]
-                - 'lengths': Feature frame lengths [batch]
-
-        Returns:
-            List of audio tensors (not implemented for continuous encoders)
+            batch_data: Batch of audio data
 
         Raises:
-            NotImplementedError: Always raises as continuous encoders
-                               don't support audio generation
+            NotImplementedError: Continuous audio uses preprocess instead
         """
         raise NotImplementedError(
-            "Continuous audio encoder doesn't support audio generation"
+            "Use preprocess for single-item processing. "
+            "Batch processing not implemented for continuous audio."
         )
 
-    def find_length(self, data: torch.Tensor) -> int:
-        raise NotImplementedError
+    def find_length(self, data: Tuple[np.ndarray, int]) -> int:
+        """Calculate frame length after encoding.
 
-    def feature_dim(self) -> Optional[int]:
+        Args:
+            data: Tuple of (audio_array, sample_rate) where audio_array
+                  has shape [num_channels, num_samples]
+
+        Returns:
+            Frame length after encoding (number of frames)
+        """
+        wav, _ = data
+        frame_length = wav.shape[-1] // self.hop_length // self.down_sample
+
+        return int(frame_length)
+
+    def copy_for_worker(self) -> "ContinuousAudioIO":
+        """Create lightweight copy for multiprocessing workers.
+
+        For continuous audio, we create a new instance without the model
+        since preprocessing doesn't require the encoder model itself.
+
+        Returns:
+            Lightweight copy suitable for workers
+        """
+        # Create new instance with same parameters
+        worker_copy = self.__class__(
+            encoder_choice=self.encoder_choice,
+            encoder_hf_model_tag=self.encoder_hf_model_tag,
+            attn_implementation=self.attn_implementation,
+            dtype=self.dtype_str,
+            device="cpu",  # Workers use CPU
+        )
+
+        # Remove the heavy model components for workers
+        # Keep only the processor which is needed for preprocessing
+        del worker_copy.model
+        worker_copy.model = None
+
+        return worker_copy
+
+    def feature_dim(self) -> int:
         """Get feature dimension for continuous representation.
 
         Returns:
-            Feature dimension (e.g., 1280 for Qwen audio encoder)
+            Feature dimension of encoder output
         """
         return self.d_model
-
-    def num_stream(self) -> Optional[int]:
-        """Get number of parallel streams (None for continuous).
-
-        Returns:
-            None (continuous modality doesn't use parallel streams)
-        """
-        return None  # Continuous audio doesn't use streams
-
-    def get_vocabulary(self) -> Optional[List[str]]:
-        """Get vocabulary (None for continuous modality).
-
-        Returns:
-            None (continuous modality doesn't have vocabulary)
-        """
-        return None  # Continuous audio doesn't have vocabulary
-
-    def get_stream_interval(self) -> Optional[List[tuple]]:
-        """Get stream intervals (None for continuous modality).
-
-        Returns:
-            None (continuous modality doesn't have stream intervals)
-        """
-        return None  # Continuous audio doesn't have stream intervals
-
-    def get_stream_weight(self) -> Optional[List[float]]:
-        """Get stream weights (None for continuous modality).
-
-        Returns:
-            None (continuous modality doesn't have stream weights)
-        """
-        return None  # Continuous audio doesn't have stream weights

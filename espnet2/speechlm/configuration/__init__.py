@@ -1,0 +1,9 @@
+from .task_conf import SUPPORTED_ENTRIES, TASK_CONFIGS
+from .task_conf_speechlm import VALID_ROLES, SPEECHLM_TASK_CONFIGS
+
+__all__ = [
+    SUPPORTED_ENTRIES,
+    TASK_CONFIGS,
+    VALID_ROLES,
+    SPEECHLM_TASK_CONFIGS,
+]

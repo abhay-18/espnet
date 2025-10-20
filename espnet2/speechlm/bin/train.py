@@ -13,6 +13,11 @@ import yaml
 import torch
 import deepspeed
 
+from espnet2.speechlm.configuration.speechlm_job import SpeechLMJobTemplate
+
+JobTemplates = dict(
+    speechlm=SpeechLMJobTemplate,
+)
 
 def get_parser() -> argparse.ArgumentParser:
     """Build argument parser for training script."""
