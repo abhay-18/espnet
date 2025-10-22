@@ -12,16 +12,16 @@ def pad_list(
     """Pad a list of sequences to the same length and stack them.
 
     Uses right padding (padding at the end of sequences).
-    Assumes the LAST dimension is the time/sequence length.
+    Assumes the FIRST dimension is the time/sequence length.
 
     Args:
         sequences: List of sequences to pad and stack.
-                  Each can be of any shape [..., seq_len] where seq_len is variable
+                  Each can be of any shape [seq_len, ...] where seq_len is variable
         pad_value: Value to use for padding (default: 0.0)
 
     Returns:
         Tuple of:
-        - Padded and stacked tensor of shape [batch, ..., max_seq_len]
+        - Padded and stacked tensor of shape [batch, max_seq_len, ...]
         - Length tensor of shape [batch] with original sequence lengths (dtype=long)
 
     Raises:
@@ -48,16 +48,18 @@ def pad_list(
             raise TypeError(f"Expected numpy array or torch tensor, got {type(seq)}")
 
         tensors.append(t)
-        seq_len = t.shape[-1]
+        seq_len = t.shape[0]  # First dimension is the length
         lengths.append(seq_len)
         max_len = max(max_len, seq_len)
 
     # Validate shapes and find common dtype
-    other_dims = tensors[0].shape[:-1]
+    other_dims = tensors[0].shape[1:]  # All dimensions except the first
 
     for t in tensors[1:]:
-        if t.shape[:-1] != other_dims:
-            raise ValueError("All sequences must have the same shape except for the last dimension")
+        if t.shape[1:] != other_dims:
+            raise ValueError(
+                "All sequences must have the same shape except for the first dimension"
+            )
 
     # Find common dtype using torch's type promotion
     dtype = tensors[0].dtype
@@ -66,12 +68,14 @@ def pad_list(
 
     # Pre-allocate output tensor
     batch_size = len(tensors)
-    output_shape = (batch_size,) + other_dims + (max_len,)
+    output_shape = (batch_size, max_len) + other_dims
     padded = torch.full(output_shape, pad_value, dtype=dtype, device=device)
 
     # Fill sequences
     for i, t in enumerate(tensors):
-        padded[i, ..., :lengths[i]] = t.to(dtype=dtype, device=device, non_blocking=True)
+        padded[i, :lengths[i], ...] = t.to(
+            dtype=dtype, device=device, non_blocking=True
+        )
 
     # Create length tensor
     length_tensor = torch.tensor(lengths, dtype=torch.long, device=device)

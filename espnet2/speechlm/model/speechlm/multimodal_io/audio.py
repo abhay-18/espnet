@@ -6,7 +6,7 @@ import torch
 import joblib
 from pathlib import Path
 
-from espnet2.speechlm.multimodal_io.abs_io import AbsIO
+from .abs_io import AbsIO
 from espnet2.speechlm.utils.data import pad_list
 
 
@@ -805,8 +805,6 @@ class ContinuousAudioIO(AbsIO):
         if wav.shape[0] > self.n_samples:
             raise ValueError("Input audio is too long to process")
         
-        print(wav, wav.shape)
-        
         feat = self.processor(
             [wav],
             truncation=False, 
@@ -814,7 +812,7 @@ class ContinuousAudioIO(AbsIO):
             do_normalize=True,
             return_token_stamps=True,
             sampling_rate=self.sample_rate
-        )['input_features'][0]
+        )['input_features'][0].T
 
         length = self.find_length(data)
         paddings = np.zeros((length, 1)).astype(np.int32)

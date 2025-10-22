@@ -7,12 +7,28 @@ import re
 import torch.nn as nn
 import numpy as np
 
-from espnet2.speechlm.template import AbsJobTemplate
-from espnet2.speechlm.configuration import SPEECHLM_TASK_CONFIGS
-from espnet2.speechlm.multimodal_io import AbsIO, MULTIMODAL_IOS
-from espnet2.speechlm.model.speechlm import SPEECHLM_MODELS
+from espnet2.speechlm.model.abs_job import AbsJobTemplate
+from espnet2.speechlm.model.speechlm.task_conf_speechlm import SPEECHLM_TASK_CONFIGS
+
+# Multimodal IOs
+from espnet2.speechlm.model.speechlm.multimodal_io.abs_io import AbsIO
+from espnet2.speechlm.model.speechlm.multimodal_io.text import HuggingFaceTextIO
+from espnet2.speechlm.model.speechlm.multimodal_io.audio import DiscreteAudioIO, ContinuousAudioIO
+
+# Main speechlm model
+from espnet2.speechlm.model.speechlm.lm.parallel import ParallelHFModel
 
 from espnet2.speechlm.utils.data import pad_list
+
+_multimodal_ios = {
+    "text": HuggingFaceTextIO,
+    "discrete_audio": DiscreteAudioIO,
+    "continuous_audio": ContinuousAudioIO,
+}
+
+_lms = {
+    "parallel": ParallelHFModel
+}
 
 class SpeechLMJobTemplate(AbsJobTemplate):
     """Job template for SpeechLM training tasks.
@@ -36,7 +52,7 @@ class SpeechLMJobTemplate(AbsJobTemplate):
         io_config = config['multimodal_io']
         self.multimodal_io = dict()
         for io_name, io_config in io_config.items():
-            multimodal_io_class = MULTIMODAL_IOS[io_name]
+            multimodal_io_class = _multimodal_ios[io_name]
             assert issubclass(multimodal_io_class, AbsIO)
             self.multimodal_io[io_name] = multimodal_io_class(**io_config)
         
@@ -105,7 +121,7 @@ class SpeechLMJobTemplate(AbsJobTemplate):
         """
 
         model_config = self.config['model']
-        model_class = SPEECHLM_MODELS[model_config['model_choice']]
+        model_class = _lms[model_config['model_choice']]
 
         model = model_class(
             model_hf_tag=model_config['model_hf_tag'],
@@ -170,23 +186,19 @@ class SpeechLMPreprocessor:
         seqs, conti_feats, loss_masks = [], [], []
         for bidx, data_dict in enumerate(data_lst):
             seqs.append(data_dict['sequence'])
-            conti_feats.append((bidx, data_dict['conti_feats']))
+            # conti_feats.append((bidx, data_dict['conti_feats']))
             loss_masks.append(data_dict['loss_mask'])
+
+            for conti_feat in data_dict['conti_feats']:
+                conti_feats.append((bidx, ) + conti_feat)
         
-        print(seqs, 'seqs')
         seqs, _ = pad_list(seqs)
-        print(seqs.shape)
-        print(loss_masks, 'loss_mask')
         loss_masks, _ = pad_list(loss_masks)
-        print(loss_masks.shape)
 
         conti_feats_dict = dict()
-        print('conti_feats: ', conti_feats[0])
+        bidx = conti_feats[0][0]
         feat = conti_feats[0][1]
-        print('length: ', len(feat))
-        for f in feat:
-            print(f)
-        for bidx, (this_io, start, length, feat) in conti_feats:
+        for bidx, this_io, start, length, feat in conti_feats:
             if this_io not in conti_feats_dict:
                 conti_feats_dict[this_io] = [[], []]
             conti_feats_dict[this_io][0].append((bidx, start, length))
@@ -195,7 +207,6 @@ class SpeechLMPreprocessor:
         for io_dict in conti_feats_dict.values():
             io_dict[1], _ = pad_list(io_dict[1])
         
-        assert 1 == 2
         return {
             "seqs": seqs,
             "conti_feats": conti_feats_dict,
@@ -244,7 +255,6 @@ class SpeechLMPreprocessor:
                 pad_size = self.num_stream - this_seq.shape[1]
                 this_seq = np.pad(this_seq, ((0, 0), (0, pad_size)))
             seq.append(this_seq)
-            accum_length += this_seq.shape[0]
 
             # (3.4) conti_feats
             if conti_feat is not None:
@@ -256,6 +266,8 @@ class SpeechLMPreprocessor:
                 pad_size = self.num_stream - loss_mask.shape[1]
                 loss_mask = np.pad(loss_mask, ((0, 0), (0, pad_size)))
             loss_masks.append(loss_mask * apply_loss)
+
+            accum_length += this_seq.shape[0]
 
             # (3.6) <eot> or <eos>
             if apply_eot:
@@ -277,10 +289,10 @@ class SpeechLMPreprocessor:
             "loss_mask": loss_mask,
         }
 
-        # self.dialogue(data)
+        # self.diagnose(data)
         return data
     
-    def dialogue(self, data):
+    def diagnose(self, data):
         seq = data['sequence']
         loss_mask = data['loss_mask']
         conti_feats = data['conti_feats']
@@ -313,7 +325,6 @@ class SpeechLMPreprocessor:
             return data_dict['dialogue']
         else:
             task_config = SPEECHLM_TASK_CONFIGS[task]
-            print('task config: ', task_config)
             messages = list()
             for role, entry in task_config:
                 if bool(re.match(r"^audio", entry)):
@@ -330,12 +341,6 @@ class SpeechLMPreprocessor:
                 message = (role, this_io, this_data)
                 messages.append(message)
             return messages
-
-    def _special_token(self, name):
-        token = f"<|{name}|>"
-        special_range = self.vocab_interval["special_token"][1]
-        return self.vocab[:special_range].index(token)
-
 
 if __name__ == "__main__":
     config = "test.yaml"

@@ -14,7 +14,7 @@ from typing import Dict, Tuple
 import yaml
 
 from espnet2.speechlm.dataloader.iterator import DataIteratorFactory
-from espnet2.speechlm.template import JOB_TEMPLATES
+from espnet2.speechlm.model import _all_job_types
 
 
 def get_parser() -> argparse.ArgumentParser:
@@ -184,7 +184,7 @@ def main():
     with open(args.train_config) as f:
         config = yaml.safe_load(f)
 
-    job_template = JOB_TEMPLATES[config['job_type']](config)
+    job_template = _all_job_types[config['job_type']](config)
     preprocessor = job_template.build_preprocessor()
 
     # Collect all specifiers to process

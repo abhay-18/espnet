@@ -13,7 +13,7 @@ import yaml
 import torch
 import deepspeed
 
-from espnet2.speechlm.template import JOB_TEMPLATES
+from espnet2.speechlm.model import _all_job_types
 from espnet2.speechlm.dataloader.iterator import DataIteratorFactory
 
 
@@ -152,7 +152,7 @@ def main():
         train_config = yaml.safe_load(f)
     logger.info(f"Loaded training config from: {args.train_config}")
 
-    job_template_class = JOB_TEMPLATES[train_config['job_type']]
+    job_template_class = _all_job_types[train_config['job_type']]
     job_template = job_template_class(train_config)
 
     # (4) build data iterator factory

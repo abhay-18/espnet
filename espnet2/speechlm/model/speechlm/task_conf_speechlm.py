@@ -1,6 +1,6 @@
 """SpeechLM-specific task configuration module."""
 
-from espnet2.speechlm.configuration.task_conf import (
+from espnet2.speechlm.dataloader.task_conf import (
     SUPPORTED_ENTRIES,
     TASK_CONFIGS,
 )
@@ -59,3 +59,7 @@ def _validate_task_consistency():
 
 _validate_task_templates()
 _validate_task_consistency()
+
+__all__ = [
+    SPEECHLM_TASK_CONFIGS
+]

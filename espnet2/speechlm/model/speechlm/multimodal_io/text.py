@@ -5,7 +5,7 @@ from typing import Dict, List
 import numpy as np
 from transformers import AutoTokenizer, AutoConfig
 
-from espnet2.speechlm.multimodal_io.abs_io import AbsIO
+from .abs_io import AbsIO
 
 
 class HuggingFaceTextIO(AbsIO):
