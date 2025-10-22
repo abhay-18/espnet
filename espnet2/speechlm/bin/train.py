@@ -7,6 +7,7 @@ This script handles argument parsing and distributed training setup.
 import argparse
 import logging
 import sys
+import os
 from pathlib import Path
 import yaml
 
@@ -17,6 +18,7 @@ import wandb
 from espnet2.speechlm.model import _all_job_types
 from espnet2.speechlm.dataloader.iterator import DataIteratorFactory
 from espnet2.speechlm.trainer.deepspeed_trainer import DeepSpeedTrainer
+from espnet2.speechlm.utils.model_summary import model_summary
 
 
 def get_parser() -> argparse.ArgumentParser:
@@ -26,14 +28,8 @@ def get_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # Distributed training arguments (handled by torchrun)
-    dist_group = parser.add_argument_group("Distributed Training")
-    dist_group.add_argument(
-        "--local-rank",
-        type=int,
-        default=0,
-        help="Local rank for distributed training (set by torchrun)",
-    )
+    # Distributed training (handled by DeepSpeed launcher via env vars)
+    # No arguments needed - DeepSpeed sets LOCAL_RANK, RANK, etc.
 
     # Training configuration
     train_group = parser.add_argument_group("Training Configuration")
@@ -135,6 +131,9 @@ def main():
     args = parser.parse_args()
 
     # (1) Setup distributed training first to get rank info
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+    torch.cuda.set_device(local_rank)
+
     deepspeed.init_distributed()
 
     assert torch.distributed.is_initialized()
@@ -219,24 +218,27 @@ def main():
 
     # (5) build model
     model = job_template.build_model()
+    message = model_summary(model)
+    logger.info(message)
 
-    # (6) Initialize wandb (mandatory, always in offline mode)
-    wandb_argument_record = {
-        "train_args": vars(args),
-        "train_config": train_config,
-    }
-
-    # Always use offline mode to keep data local
+    # (6) Initialize wandb: on rank 0 GPU; offline mode.
     wandb_name = args.wandb_name or f"run_{args.output_dir.name}"
-    wandb.init(
-        mode='offline',
-        project='local',
-        name=wandb_name,
-        config=wandb_argument_record,
-        tags=args.wandb_tags,
-        dir=str(args.output_dir),
-        resume="auto",
-    )
+    if rank == 0:
+        wandb_argument_record = {
+            "train_args": vars(args),
+            "train_config": train_config,
+        }
+        wandb.init(
+            mode='offline',
+            project='local',
+            name=wandb_name,
+            config=wandb_argument_record,
+            tags=args.wandb_tags,
+            dir=str(args.output_dir),
+            resume="auto",
+        )
+    else:
+        wandb.init(mode="disabled")
     logger.info(f"wandb initialization: name={wandb_name}")
 
     # (7) Initialize DeepSpeed trainer and train

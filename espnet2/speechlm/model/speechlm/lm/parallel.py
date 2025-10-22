@@ -73,7 +73,7 @@ def build_parallel_hf_class(model_hf_tag):
             # (3) build stream embeddings. First stream doesn't apply this embedding
             possible_num_stream = [io.num_stream() for io in multimodal_io.values() if io.is_discrete]
             if len(possible_num_stream) == 0:
-                raise ValueError("Cannot proceed with all IOs are continuous")
+                raise ValueError("Cannot proceed with all IOs being continuous")
             model.num_stream = max(possible_num_stream)
             model.stream_emb = nn.Embedding(model.num_stream, embed_dim)
 

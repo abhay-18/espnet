@@ -142,6 +142,8 @@ class DeepSpeedTrainer:
             self.model_engine.step()
 
             self.global_step += 1
+
+            # TODO: sync the stats across GPUs before logging
             assert all(isinstance(v, float) for v in stats.values())
             stats = {f"train/{key}": value for key, value in stats.items()}
             wandb.log(stats, step=self.global_step)

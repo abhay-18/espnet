@@ -111,6 +111,7 @@ class SpeechLMJobTemplate(AbsJobTemplate):
             audio_input=processor_config['audio_input'],
             audio_output=processor_config['audio_output'],
             loss_region=processor_config['loss_region'],
+            batchfy_method=self.config["data_loading"].get("batchfy_method", "bucket"),
         )
 
     def build_model(self) -> torch.nn.Module:
@@ -144,7 +145,8 @@ class SpeechLMPreprocessor:
         vocab_interval,
         audio_input: str = "continuous_audio",
         audio_output: str = "discrete_audio",
-        loss_region: str = "assistant"
+        loss_region: str = "assistant",
+        batchfy_method: str = "bucket",
     ):
         
         # (1) keep all multimodal_io
@@ -152,6 +154,7 @@ class SpeechLMPreprocessor:
         self.audio_input = audio_input
         self.audio_output = audio_output
         self.loss_region = loss_region
+        self.batchfy_method = batchfy_method
 
         # (2) vocabulary
         self.vocab = vocab
@@ -205,18 +208,23 @@ class SpeechLMPreprocessor:
             conti_feats_dict[this_io][1].append(feat)
         
         for io_dict in conti_feats_dict.values():
+            max_length = max(c[2] for c in io_dict[0])
             io_dict[1], _ = pad_list(io_dict[1])
-            io_dict[1] = torch.Tensor(io_dict[1])
+            io_dict[1] = torch.Tensor(io_dict[1])[:, :max_length]
+            print('after trunkcing: ', io_dict[1].size())
 
         seqs = torch.Tensor(seqs).long()
-        loss_mask = torch.Tensor(loss_mask).float()
+        loss_mask = torch.Tensor(loss_masks).float()
         keys = [key for key, _ in data_lst]
+        
+        if self.batchfy_method == "pack":
+            raise NotImplementedError("Pack sequence is not implemented yet.")
 
         return {
             "key": keys,
             "seqs": seqs,
             "conti_feats": conti_feats_dict,
-            "loss_masks": loss_masks
+            "loss_masks": loss_mask
         }
     
     def preprocessing(self, key, data_dict):
@@ -288,14 +296,12 @@ class SpeechLMPreprocessor:
         loss_mask = np.concatenate(loss_masks, axis=0)
 
         # TODO: Add CFG here
-        print('internal conti feats: ', conti_feats)
         data = {
             "sequence": seq,
             "conti_feats": conti_feats,
             "loss_mask": loss_mask,
         }
 
-        # self.diagnose(data)
         return data
     
     def diagnose(self, data):
