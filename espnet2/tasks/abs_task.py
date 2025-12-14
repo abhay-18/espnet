@@ -1599,7 +1599,7 @@ class AbsTask(ABC):
 
                     # Wandb server generates a random name, if args.wandb_name is None
                     name = args.wandb_name
-
+                    # args.allow_val_change = True  # To allow val change in wandb
                     wandb.init(
                         entity=args.wandb_entity,
                         project=project,

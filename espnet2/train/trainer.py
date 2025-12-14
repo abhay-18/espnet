@@ -1,6 +1,7 @@
 """Trainer module."""
 
 import argparse
+import os
 import dataclasses
 import logging
 import time
@@ -818,6 +819,21 @@ class Trainer:
             if distributed:
                 iterator_stop.fill_(1)
                 torch.distributed.all_reduce(iterator_stop, ReduceOp.SUM)
+        save_this_rank = True
+        if distributed:
+            import torch.distributed as dist
+            if dist.get_rank() != 0:
+                save_this_rank = False
+
+        if save_this_rank:
+            ckpt_dir = getattr(options, "outdir", ".")
+            os.makedirs(ckpt_dir, exist_ok=True)
+
+            model_to_save = model.module if hasattr(model, "module") else model
+            path = os.path.join(ckpt_dir, f"last_iter_epoch{reporter.epoch}.pth")
+
+            torch.save({"model": model_to_save.state_dict()}, path)
+            logging.info(f"Saved last iteration weights for epoch → {path}")
         return all_steps_are_invalid
 
     @classmethod
@@ -868,7 +884,9 @@ class Trainer:
                 # Apply weighted averaging for stats.
                 # if distributed, this method can also apply all_reduce()
                 stats, weight = recursive_average(stats, weight, distributed)
-
+                # import pdb; pdb.set_trace()
+                print(type(weight), type(stats))
+                # print(stats, weight)
             reporter.register(stats, weight)
             reporter.next()
 

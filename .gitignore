@@ -124,3 +124,12 @@ tools/condarc
 tools/lightning_constraints.txt
 tools/versa
 tools/ParallelWaveGAN
+
+egs2/multilingual/asr1/last_iter_epoch1.pth
+egs2/multilingual/asr1/logs.log
+egs2/multilingual/asr1/nccl_%r.log
+
+egs2/marathi/asr1/mr_bf_opensource_120m_1024bpe
+egs2/marathi/asr1/old_data
+check_gpu_threshold.sh
+gpu_alert.log

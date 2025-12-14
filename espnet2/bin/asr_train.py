@@ -6,6 +6,7 @@ def get_parser():
     parser = ASRTask.get_parser()
     return parser
 
+# print(get_parser())
 
 def main(cmd=None):
     r"""ASR training.
