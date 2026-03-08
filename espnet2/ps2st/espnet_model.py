@@ -4,9 +4,9 @@ import torch
 import yaml
 from typeguard import typechecked
 
+from espnet2.legacy.nets.beam_search import BeamSearch
 from espnet2.torch_utils.device_funcs import force_gatherable
 from espnet2.train.abs_espnet_model import AbsESPnetModel
-from espnet.nets.beam_search import BeamSearch
 
 from .qwen2_scorer import Qwen2HFScorer
 
@@ -16,11 +16,17 @@ try:
         AutoProcessor,
         Qwen2AudioForConditionalGeneration,
     )
-    from transformers.modeling_utils import no_init_weights
 
     is_transformers_available = True
 except ImportError:
     is_transformers_available = False
+
+if is_transformers_available:
+    try:
+        # transformers < v5
+        from transformers.modeling_utils import no_init_weights
+    except ImportError:
+        from transformers.initialization import no_init_weights
 
 
 class ESPnetQwen2AudioModel(AbsESPnetModel):
